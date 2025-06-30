@@ -14,6 +14,7 @@ use std::str::FromStr;
 
 #[tokio::main]
 async fn main() {
+    //routes
     let app = Router::new()
         .route("/keypair", post(generate_keypair))
         .route("/token/create", post(create_token))
@@ -27,13 +28,12 @@ async fn main() {
         .await
         .expect("Failed to bind to port 3001");
     
-    println!("Solana HTTP server running on http://0.0.0.0:3001 - UPDATED VERSION WITH STATUS CODES");
+    println!("Server running on port 3001");
     axum::serve(listener, app).await.unwrap();
 }
 
-// Request structures
 #[derive(Deserialize)]
-struct CreateTokenRequest {
+struct CreateTokenReq {
     #[serde(rename = "mintAuthority")]
     mint_authority: Option<String>,
     mint: Option<String>,
@@ -41,75 +41,75 @@ struct CreateTokenRequest {
 }
 
 #[derive(Deserialize)]
-struct MintTokenRequest {
+struct MintTokenReq {
     mint: Option<String>,
     destination: Option<String>,
     authority: Option<String>,
-    #[serde(deserialize_with = "deserialize_amount")]
+    #[serde(deserialize_with = "parse_amount")]
     amount: Option<u64>,
 }
 
 #[derive(Deserialize)]
-struct SignMessageRequest {
+struct SignMsgReq {
     message: Option<String>,
     secret: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct VerifyMessageRequest {
+struct VerifyMsgReq {
     message: Option<String>,
     signature: Option<String>,
     pubkey: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct SendSolRequest {
+struct SendSolReq {
     from: Option<String>,
     to: Option<String>,
-    #[serde(deserialize_with = "deserialize_amount")]
+    #[serde(deserialize_with = "parse_amount")]
     lamports: Option<u64>,
 }
 
 #[derive(Deserialize)]
-struct SendTokenRequest {
+struct SendTokenReq {
     destination: Option<String>,
     mint: Option<String>,
     owner: Option<String>,
-    #[serde(deserialize_with = "deserialize_amount")]
+    #[serde(deserialize_with = "parse_amount")]
     amount: Option<u64>,
 }
 
-// Custom deserializer to handle both string and number amounts
-fn deserialize_amount<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+fn parse_amount<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     use serde::de::{self, Visitor};
     use std::fmt;
 
-    struct AmountVisitor;
+    struct AmtVisitor;
 
-    impl<'de> Visitor<'de> for AmountVisitor {
+    impl<'de> Visitor<'de> for AmtVisitor {
         type Value = Option<u64>;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a number or string representing an amount")
+            formatter.write_str("number or string amount")
         }
 
-        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        fn visit_u64<E>(self, val: u64) -> Result<Self::Value, E>
         where
             E: de::Error,
         {
-            Ok(Some(value))
+            Ok(Some(val))
         }
 
-        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
         where
             E: de::Error,
         {
-            value.parse::<u64>()
-                .map(Some)
-                .map_err(|_| de::Error::custom("Invalid amount format"))
+            match s.parse::<u64>() {
+                Ok(n) => Ok(Some(n)),
+                Err(_) => Err(de::Error::custom("bad amount format")),
+            }
         }
 
         fn visit_none<E>(self) -> Result<Self::Value, E>
@@ -127,497 +127,484 @@ where
         }
     }
 
-    deserializer.deserialize_any(AmountVisitor)
+    deserializer.deserialize_any(AmtVisitor)
 }
 
-// Response structures
 #[derive(Serialize)]
-struct KeypairData {
+struct KeypairResp {
     pubkey: String,
     secret: String,
 }
 
 #[derive(Serialize)]
-struct AccountInfo {
+struct AccInfo {
     pubkey: String,
     is_signer: bool,
     is_writable: bool,
 }
 
 #[derive(Serialize)]
-struct InstructionData {
+struct InstructionResp {
     program_id: String,
-    accounts: Vec<AccountInfo>,
+    accounts: Vec<AccInfo>,
     instruction_data: String,
 }
 
 #[derive(Serialize)]
-struct SignMessageData {
+struct SignResp {
     signature: String,
     public_key: String,
     message: String,
 }
 
 #[derive(Serialize)]
-struct VerifyMessageData {
+struct VerifyResp {
     valid: bool,
     message: String,
     pubkey: String,
 }
 
 #[derive(Serialize)]
-struct SendSolData {
+struct SolTransferResp {
     program_id: String,
     accounts: Vec<String>,
     instruction_data: String,
 }
 
 #[derive(Serialize)]
-struct SendTokenAccountInfo {
+struct TokenAccInfo {
     pubkey: String,
     #[serde(rename = "isSigner")]
     is_signer: bool,
 }
 
 #[derive(Serialize)]
-struct SendTokenData {
+struct TokenTransferResp {
     program_id: String,
-    accounts: Vec<SendTokenAccountInfo>,
+    accounts: Vec<TokenAccInfo>,
     instruction_data: String,
 }
 
-// Helper functions
-fn success_response(data: impl Serialize) -> (StatusCode, ResponseJson<Value>) {
+fn ok_response(data: impl Serialize) -> (StatusCode, ResponseJson<Value>) {
     (StatusCode::OK, ResponseJson(json!({
         "success": true,
         "data": data
     })))
 }
 
-fn error_response(error: &str) -> (StatusCode, ResponseJson<Value>) {
+fn err_response(msg: &str) -> (StatusCode, ResponseJson<Value>) {
     (StatusCode::BAD_REQUEST, ResponseJson(json!({
         "success": false,
-        "error": error
+        "error": msg
     })))
 }
 
-fn parse_pubkey(pubkey_str: &str, field_name: &str) -> Result<Pubkey, String> {
-    // Additional validation for pubkey format
-    if pubkey_str.len() < 32 || pubkey_str.len() > 44 {
-        return Err(format!("Invalid {} address format", field_name));
+fn parse_address(addr: &str, name: &str) -> Result<Pubkey, String> {
+    // basic length check
+    if addr.len() < 32 || addr.len() > 44 {
+        return Err(format!("bad {} format", name));
     }
     
-    Pubkey::from_str(pubkey_str)
-        .map_err(|_| format!("Invalid {} address", field_name))
+    match Pubkey::from_str(addr) {
+        Ok(pk) => Ok(pk),
+        Err(_) => Err(format!("invalid {}", name)),
+    }
 }
 
-
-
-fn validate_positive_amount(amount: u64, field_name: &str) -> Result<(), String> {
-    if amount == 0 {
-        return Err(format!("Invalid {} - amount must be greater than 0", field_name));
+fn check_amount(amt: u64, field: &str) -> Result<(), String> {
+    if amt == 0 {
+        return Err(format!("{} must be > 0", field));
     }
-    // Additional validation for reasonable limits
-    if amount > u64::MAX / 2 {
-        return Err(format!("Invalid {} - amount too large", field_name));
-    }
-    Ok(())
-}
-
-fn validate_decimals(decimals: u8) -> Result<(), String> {
-    if decimals > 9 {
-        return Err("Invalid decimals - maximum allowed is 9".to_string());
+    // don't allow crazy large amounts
+    if amt > u64::MAX / 2 {
+        return Err(format!("{} too big", field));
     }
     Ok(())
 }
 
-// Endpoint handlers
+fn check_decimals(d: u8) -> Result<(), String> {
+    if d > 9 {
+        return Err("max 9 decimals".to_string());
+    }
+    Ok(())
+}
+
 async fn generate_keypair() -> impl IntoResponse {
-    let keypair = Keypair::new();
-    let secret_base58 = bs58::encode(&keypair.to_bytes()).into_string();
-    let pubkey_base58 = keypair.pubkey().to_string();
+    let kp = Keypair::new();
+    let secret_b58 = bs58::encode(&kp.to_bytes()).into_string();
+    let pubkey_b58 = kp.pubkey().to_string();
     
-    let keypair_data = KeypairData {
-        pubkey: pubkey_base58,
-        secret: secret_base58,
+    let resp = KeypairResp {
+        pubkey: pubkey_b58,
+        secret: secret_b58,
     };
     
-    success_response(keypair_data)
+    ok_response(resp)
 }
 
-async fn create_token(Json(request): Json<CreateTokenRequest>) -> impl IntoResponse {
-    // Validate required fields are present and not empty
-    let mint_authority_str = match request.mint_authority {
+async fn create_token(Json(req): Json<CreateTokenReq>) -> impl IntoResponse {
+    let mint_auth = match req.mint_authority {
         Some(ref ma) if !ma.trim().is_empty() => ma.trim(),
-        _ => return error_response("Missing required fields"),
+        _ => return err_response("need mint authority"),
     };
     
-    let mint_str = match request.mint {
+    let mint_addr = match req.mint {
         Some(ref m) if !m.trim().is_empty() => m.trim(),
-        _ => return error_response("Missing required fields"),
+        _ => return err_response("need mint"),
     };
     
-    let decimals = match request.decimals {
+    let decimals = match req.decimals {
         Some(d) => d,
-        None => return error_response("Missing required fields"),
+        None => return err_response("need decimals"),
     };
     
-    // Validate decimals
-    if let Err(e) = validate_decimals(decimals) {
-        return error_response(&e);
+    if let Err(e) = check_decimals(decimals) {
+        return err_response(&e);
     }
     
-    let mint_authority = match parse_pubkey(mint_authority_str, "mint authority") {
+    let mint_authority_pk = match parse_address(mint_auth, "mint authority") {
         Ok(pk) => pk,
-        Err(e) => return error_response(&e),
+        Err(e) => return err_response(&e),
     };
     
-    let mint = match parse_pubkey(mint_str, "mint") {
+    let mint_pk = match parse_address(mint_addr, "mint") {
         Ok(pk) => pk,
-        Err(e) => return error_response(&e),
+        Err(e) => return err_response(&e),
     };
     
-    // Prevent self-authorization for security
-    if mint_authority == mint {
-        return error_response("Mint and mint authority cannot be the same");
+    // can't be same
+    if mint_authority_pk == mint_pk {
+        return err_response("mint and authority can't match");
     }
     
-    let instruction = match spl_instruction::initialize_mint(
+    let ix = match spl_instruction::initialize_mint(
         &TOKEN_PROGRAM_ID,
-        &mint,
-        &mint_authority,
+        &mint_pk,
+        &mint_authority_pk,
         None,
         decimals,
     ) {
-        Ok(inst) => inst,
-        Err(e) => return error_response(&format!("Failed to create token instruction: {}", e)),
+        Ok(instruction) => instruction,
+        Err(e) => return err_response(&format!("failed to build ix: {}", e)),
     };
     
-    let accounts: Vec<AccountInfo> = instruction.accounts
+    let accs: Vec<AccInfo> = ix.accounts
         .iter()
-        .map(|acc| AccountInfo {
+        .map(|acc| AccInfo {
             pubkey: acc.pubkey.to_string(),
             is_signer: acc.is_signer,
             is_writable: acc.is_writable,
         })
         .collect();
     
-    let instruction_data = general_purpose::STANDARD.encode(&instruction.data);
+    let ix_data = general_purpose::STANDARD.encode(&ix.data);
     
-    let token_data = InstructionData {
-        program_id: instruction.program_id.to_string(),
-        accounts,
-        instruction_data,
+    let resp = InstructionResp {
+        program_id: ix.program_id.to_string(),
+        accounts: accs,
+        instruction_data: ix_data,
     };
     
-    success_response(token_data)
+    ok_response(resp)
 }
 
-async fn mint_token(Json(request): Json<MintTokenRequest>) -> impl IntoResponse {
-    // Validate required fields are present and not empty
-    let mint_str = match request.mint {
+async fn mint_token(Json(req): Json<MintTokenReq>) -> impl IntoResponse {
+    let mint_addr = match req.mint {
         Some(ref m) if !m.trim().is_empty() => m.trim(),
-        _ => return error_response("Missing required fields"),
+        _ => return err_response("need mint"),
     };
     
-    let destination_str = match request.destination {
+    let dest_addr = match req.destination {
         Some(ref d) if !d.trim().is_empty() => d.trim(),
-        _ => return error_response("Missing required fields"),
+        _ => return err_response("need destination"),
     };
     
-    let authority_str = match request.authority {
+    let auth_addr = match req.authority {
         Some(ref a) if !a.trim().is_empty() => a.trim(),
-        _ => return error_response("Missing required fields"),
+        _ => return err_response("need authority"),
     };
     
-    let amount = match request.amount {
-        Some(amt) => {
-            if let Err(e) = validate_positive_amount(amt, "amount") {
-                return error_response(&e);
+    let amt = match req.amount {
+        Some(amount) => {
+            if let Err(e) = check_amount(amount, "amount") {
+                return err_response(&e);
             }
-            amt
+            amount
         },
-        None => return error_response("Missing required fields"),
+        None => return err_response("need amount"),
     };
     
-    let mint = match parse_pubkey(mint_str, "mint") {
+    let mint_pk = match parse_address(mint_addr, "mint") {
         Ok(pk) => pk,
-        Err(e) => return error_response(&e),
+        Err(e) => return err_response(&e),
     };
     
-    let destination = match parse_pubkey(destination_str, "destination") {
+    let dest_pk = match parse_address(dest_addr, "destination") {
         Ok(pk) => pk,
-        Err(e) => return error_response(&e),
+        Err(e) => return err_response(&e),
     };
     
-    let authority = match parse_pubkey(authority_str, "authority") {
+    let auth_pk = match parse_address(auth_addr, "authority") {
         Ok(pk) => pk,
-        Err(e) => return error_response(&e),
+        Err(e) => return err_response(&e),
     };
     
-    // Prevent minting to the same address as mint for security
-    if destination == mint {
-        return error_response("Destination cannot be the same as mint address");
+    if dest_pk == mint_pk {
+        return err_response("can't mint to mint address");
     }
     
-    let instruction = match spl_instruction::mint_to(
+    let ix = match spl_instruction::mint_to(
         &TOKEN_PROGRAM_ID,
-        &mint,
-        &destination,
-        &authority,
+        &mint_pk,
+        &dest_pk,
+        &auth_pk,
         &[],
-        amount,
+        amt,
     ) {
-        Ok(inst) => inst,
-        Err(e) => return error_response(&format!("Failed to create mint instruction: {}", e)),
+        Ok(instruction) => instruction,
+        Err(e) => return err_response(&format!("failed ix: {}", e)),
     };
     
-    let accounts: Vec<AccountInfo> = instruction.accounts
+    let accs: Vec<AccInfo> = ix.accounts
         .iter()
-        .map(|acc| AccountInfo {
+        .map(|acc| AccInfo {
             pubkey: acc.pubkey.to_string(),
             is_signer: acc.is_signer,
             is_writable: acc.is_writable,
         })
         .collect();
     
-    let instruction_data = general_purpose::STANDARD.encode(&instruction.data);
+    let ix_data = general_purpose::STANDARD.encode(&ix.data);
     
-    let mint_data = InstructionData {
-        program_id: instruction.program_id.to_string(),
-        accounts,
-        instruction_data,
+    let resp = InstructionResp {
+        program_id: ix.program_id.to_string(),
+        accounts: accs,
+        instruction_data: ix_data,
     };
     
-    success_response(mint_data)
+    ok_response(resp)
 }
 
-async fn sign_message(Json(request): Json<SignMessageRequest>) -> impl IntoResponse {
-    // Validate required fields are present and not empty
-    let message = match request.message {
+async fn sign_message(Json(req): Json<SignMsgReq>) -> impl IntoResponse {
+    let msg = match req.message {
         Some(ref m) if !m.trim().is_empty() => m.trim(),
-        _ => return error_response("Missing required fields"),
+        _ => return err_response("need message"),
     };
     
-    let secret = match request.secret {
+    let secret_key = match req.secret {
         Some(ref s) if !s.trim().is_empty() => s.trim(),
-        _ => return error_response("Missing required fields"),
+        _ => return err_response("need secret"),
     };
     
-    // Validate message length for security
-    if message.len() > 1024 {
-        return error_response("Message too long - maximum 1024 characters");
+    // don't allow super long messages
+    if msg.len() > 1024 {
+        return err_response("message too long");
     }
     
-    let secret_bytes = match bs58::decode(secret).into_vec() {
+    let secret_bytes = match bs58::decode(secret_key).into_vec() {
         Ok(bytes) => bytes,
-        Err(_) => return error_response("Invalid secret key format"),
+        Err(_) => return err_response("bad secret format"),
     };
     
     if secret_bytes.len() != 64 {
-        return error_response("Invalid secret key length");
+        return err_response("wrong secret length");
     }
     
-    let keypair = match Keypair::from_bytes(&secret_bytes) {
-        Ok(kp) => kp,
-        Err(_) => return error_response("Invalid secret key"),
+    let kp = match Keypair::from_bytes(&secret_bytes) {
+        Ok(keypair) => keypair,
+        Err(_) => return err_response("invalid secret"),
     };
     
-    let signature = keypair.sign_message(message.as_bytes());
-    let signature_base64 = general_purpose::STANDARD.encode(signature.as_ref());
+    let sig = kp.sign_message(msg.as_bytes());
+    let sig_b64 = general_purpose::STANDARD.encode(sig.as_ref());
     
-    let sign_data = SignMessageData {
-        signature: signature_base64,
-        public_key: keypair.pubkey().to_string(),
-        message: message.to_string(),
+    let resp = SignResp {
+        signature: sig_b64,
+        public_key: kp.pubkey().to_string(),
+        message: msg.to_string(),
     };
     
-    success_response(sign_data)
+    ok_response(resp)
 }
 
-async fn verify_message(Json(request): Json<VerifyMessageRequest>) -> impl IntoResponse {
-    // Validate required fields are present and not empty
-    let message = match request.message {
+async fn verify_message(Json(req): Json<VerifyMsgReq>) -> impl IntoResponse {
+    let msg = match req.message {
         Some(ref m) if !m.trim().is_empty() => m.trim(),
-        _ => return error_response("Missing required fields"),
+        _ => return err_response("need message"),
     };
     
-    let signature_str = match request.signature {
+    let sig_str = match req.signature {
         Some(ref s) if !s.trim().is_empty() => s.trim(),
-        _ => return error_response("Missing required fields"),
+        _ => return err_response("need signature"),
     };
     
-    let pubkey_str = match request.pubkey {
+    let pk_str = match req.pubkey {
         Some(ref p) if !p.trim().is_empty() => p.trim(),
-        _ => return error_response("Missing required fields"),
+        _ => return err_response("need pubkey"),
     };
     
-    // Validate message length for security
-    if message.len() > 1024 {
-        return error_response("Message too long - maximum 1024 characters");
+    if msg.len() > 1024 {
+        return err_response("message too long");
     }
     
-    let pubkey = match parse_pubkey(pubkey_str, "public key") {
-        Ok(pk) => pk,
-        Err(e) => return error_response(&e),
+    let pk = match parse_address(pk_str, "pubkey") {
+        Ok(pubkey) => pubkey,
+        Err(e) => return err_response(&e),
     };
     
-    let signature_bytes = match general_purpose::STANDARD.decode(signature_str) {
+    let sig_bytes = match general_purpose::STANDARD.decode(sig_str) {
         Ok(bytes) => bytes,
-        Err(_) => return error_response("Invalid signature format"),
+        Err(_) => return err_response("bad signature format"),
     };
     
-    if signature_bytes.len() != 64 {
-        return error_response("Invalid signature length");
+    if sig_bytes.len() != 64 {
+        return err_response("wrong signature length");
     }
     
-    let signature = match Signature::try_from(signature_bytes.as_slice()) {
-        Ok(sig) => sig,
-        Err(_) => return error_response("Invalid signature"),
+    let sig = match Signature::try_from(sig_bytes.as_slice()) {
+        Ok(signature) => signature,
+        Err(_) => return err_response("invalid signature"),
     };
     
-    let is_valid = signature.verify(&pubkey.to_bytes(), message.as_bytes());
+    let valid = sig.verify(&pk.to_bytes(), msg.as_bytes());
     
-    let verify_data = VerifyMessageData {
-        valid: is_valid,
-        message: message.to_string(),
-        pubkey: pubkey_str.to_string(),
+    let resp = VerifyResp {
+        valid: valid,
+        message: msg.to_string(),
+        pubkey: pk_str.to_string(),
     };
     
-    success_response(verify_data)
+    ok_response(resp)
 }
 
-async fn send_sol(Json(request): Json<SendSolRequest>) -> impl IntoResponse {
-    // Validate required fields are present and not empty
-    let from = match request.from {
+async fn send_sol(Json(req): Json<SendSolReq>) -> impl IntoResponse {
+    let from_addr = match req.from {
         Some(ref f) if !f.trim().is_empty() => f.trim(),
-        _ => return error_response("Missing required fields"),
+        _ => return err_response("need from address"),
     };
     
-    let to = match request.to {
+    let to_addr = match req.to {
         Some(ref t) if !t.trim().is_empty() => t.trim(),
-        _ => return error_response("Missing required fields"),
+        _ => return err_response("need to address"),
     };
     
-    let lamports = match request.lamports {
+    let lamports = match req.lamports {
         Some(l) => {
-            if let Err(e) = validate_positive_amount(l, "lamports") {
-                return error_response(&e);
+            if let Err(e) = check_amount(l, "lamports") {
+                return err_response(&e);
             }
             l
         },
-        None => return error_response("Missing required fields"),
+        None => return err_response("need lamports"),
     };
     
-    let from_pubkey = match parse_pubkey(from, "from") {
+    let from_pk = match parse_address(from_addr, "from") {
         Ok(pk) => pk,
-        Err(e) => return error_response(&e),
+        Err(e) => return err_response(&e),
     };
     
-    let to_pubkey = match parse_pubkey(to, "to") {
+    let to_pk = match parse_address(to_addr, "to") {
         Ok(pk) => pk,
-        Err(e) => return error_response(&e),
+        Err(e) => return err_response(&e),
     };
     
-    // Prevent self-transfer for security
-    if from_pubkey == to_pubkey {
-        return error_response("Cannot transfer to the same address");
+    if from_pk == to_pk {
+        return err_response("can't send to self");
     }
     
-    let instruction = system_instruction::transfer(&from_pubkey, &to_pubkey, lamports);
+    let ix = system_instruction::transfer(&from_pk, &to_pk, lamports);
     
-    let accounts: Vec<String> = instruction.accounts
+    let accs: Vec<String> = ix.accounts
         .iter()
         .map(|acc| acc.pubkey.to_string())
         .collect();
     
-    let instruction_data = general_purpose::STANDARD.encode(&instruction.data);
+    let ix_data = general_purpose::STANDARD.encode(&ix.data);
     
-    let sol_data = SendSolData {
-        program_id: instruction.program_id.to_string(),
-        accounts,
-        instruction_data,
+    let resp = SolTransferResp {
+        program_id: ix.program_id.to_string(),
+        accounts: accs,
+        instruction_data: ix_data,
     };
     
-    success_response(sol_data)
+    ok_response(resp)
 }
 
-async fn send_token(Json(request): Json<SendTokenRequest>) -> impl IntoResponse {
-    // Validate required fields are present and not empty
-    let destination = match request.destination {
-        Some(ref dest) if !dest.trim().is_empty() => dest.trim(),
-        _ => return error_response("Missing required fields"),
+async fn send_token(Json(req): Json<SendTokenReq>) -> impl IntoResponse {
+    let dest = match req.destination {
+        Some(ref dest_addr) if !dest_addr.trim().is_empty() => dest_addr.trim(),
+        _ => return err_response("need destination"),
     };
     
-    let mint = match request.mint {
+    let mint_addr = match req.mint {
         Some(ref m) if !m.trim().is_empty() => m.trim(),
-        _ => return error_response("Missing required fields"),
+        _ => return err_response("need mint"),
     };
     
-    let owner = match request.owner {
+    let owner_addr = match req.owner {
         Some(ref o) if !o.trim().is_empty() => o.trim(),
-        _ => return error_response("Missing required fields"),
+        _ => return err_response("need owner"),
     };
     
-    let amount = match request.amount {
-        Some(amt) => {
-            if let Err(e) = validate_positive_amount(amt, "amount") {
-                return error_response(&e);
+    let amt = match req.amount {
+        Some(amount) => {
+            if let Err(e) = check_amount(amount, "amount") {
+                return err_response(&e);
             }
-            amt
+            amount
         },
-        None => return error_response("Missing required fields"),
+        None => return err_response("need amount"),
     };
     
-    let destination_pubkey = match parse_pubkey(destination, "destination") {
+    let dest_pk = match parse_address(dest, "destination") {
         Ok(pk) => pk,
-        Err(e) => return error_response(&e),
+        Err(e) => return err_response(&e),
     };
     
-    let mint_pubkey = match parse_pubkey(mint, "mint") {
+    let mint_pk = match parse_address(mint_addr, "mint") {
         Ok(pk) => pk,
-        Err(e) => return error_response(&e),
+        Err(e) => return err_response(&e),
     };
     
-    let owner_pubkey = match parse_pubkey(owner, "owner") {
+    let owner_pk = match parse_address(owner_addr, "owner") {
         Ok(pk) => pk,
-        Err(e) => return error_response(&e),
+        Err(e) => return err_response(&e),
     };
     
-    let source_pubkey = spl_associated_token_account::get_associated_token_address(&owner_pubkey, &mint_pubkey);
+    let source_pk = spl_associated_token_account::get_associated_token_address(&owner_pk, &mint_pk);
     
-    // Prevent self-transfer for security
-    if source_pubkey == destination_pubkey {
-        return error_response("Cannot transfer to the same token account");
+    // check not same account
+    if source_pk == dest_pk {
+        return err_response("can't send to same account");
     }
     
-    let instruction = match spl_instruction::transfer(
+    let ix = match spl_instruction::transfer(
         &TOKEN_PROGRAM_ID,
-        &source_pubkey,
-        &destination_pubkey,
-        &owner_pubkey,
+        &source_pk,
+        &dest_pk,
+        &owner_pk,
         &[],
-        amount,
+        amt,
     ) {
-        Ok(inst) => inst,
-        Err(e) => return error_response(&format!("Failed to create transfer instruction: {}", e)),
+        Ok(instruction) => instruction,
+        Err(e) => return err_response(&format!("failed ix: {}", e)),
     };
     
-    let accounts: Vec<SendTokenAccountInfo> = instruction.accounts
+    let accs: Vec<TokenAccInfo> = ix.accounts
         .iter()
-        .map(|acc| SendTokenAccountInfo {
+        .map(|acc| TokenAccInfo {
             pubkey: acc.pubkey.to_string(),
             is_signer: acc.is_signer,
         })
         .collect();
     
-    let instruction_data = general_purpose::STANDARD.encode(&instruction.data);
+    let ix_data = general_purpose::STANDARD.encode(&ix.data);
     
-    let token_data = SendTokenData {
-        program_id: instruction.program_id.to_string(),
-        accounts,
-        instruction_data,
+    let resp = TokenTransferResp {
+        program_id: ix.program_id.to_string(),
+        accounts: accs,
+        instruction_data: ix_data,
     };
     
-    success_response(token_data)
+    ok_response(resp)
 }
